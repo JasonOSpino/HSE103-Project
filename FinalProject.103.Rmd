@@ -1,0 +1,174 @@
+---
+title: "Submission 1"
+output: html_document
+date: "2026-10-21"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+
+# Load the three files exactly as provided (no edits to the original CSVs)
+GSE.covar.raw <-read_csv("~/Desktop/HDS/HSE103/FinalProject/GSE85307_covar-1.csv")
+
+GSE.GE.raw <-read_csv("~/Desktop/HDS/HSE103/FinalProject/GSE85307_geneExpression.csv")
+
+GSE.GN.raw <-read_csv("~/Desktop/HDS/HSE103/FinalProject/GSE85307_geneNames.csv")
+```
+
+
+## Step 1: Clean the covariate data
+
+```{r}
+
+head(GSE.covar.raw)
+summary(GSE.covar.raw)
+
+# Data Wrangling time! Whoohoo! Seems like there are some extra text in some
+# columns that make unwanted 'noise'. With the help of the trusty mutate function
+# we can clean these cells up!
+GSE.covar <- GSE.covar.raw %>%
+  mutate(
+    mat_age_yrs = str_remove_all(mat_age_yrs,"age_years: "),
+    preg_preeclampsia = str_remove_all(preg_preeclampsia, "pregnancy_condition: "),
+    delivery_gestAge_wks = str_remove_all(delivery_gestAge_wks, "gestation_weeks: "),
+    sampleCollection_gestAge_wks = str_remove_all(sampleCollection_gestAge_wks, "blood_draw_at_gestation_week: "),
+    batch_Microarray = str_remove_all(batch_Microarray, "microarray_hybridization_date: "),
+    mat_BMI = str_remove_all(mat_BMI, "bmi_kg/m2: "),
+    mat_vitD = str_remove_all(mat_vitD, "vitamind_25\\(0h\\)_ng/ml_whole_blood_baseline: "),
+    mat_asthma = ifelse(str_ends(mat_asthma, "1"), "1", "0"))
+
+
+# I also noticed all varaibles are stored as characters, for safe keeping
+# I am going to change the ones that look like numeric measure to numeric 
+GSE.covar <- GSE.covar %>%
+  mutate(across(c(mat_age_yrs, delivery_gestAge_wks, sampleCollection_gestAge_wks,
+                  mat_BMI, mat_vitD),
+                as.numeric))
+
+
+head(GSE.covar)
+dim(GSE.covar)
+```
+
+
+## Step 2: Make the categorical variables
+
+```{r}
+# Categorical variable #1: preeclampsia status (already categories, so we just
+# tell R it's a factor and put "Normal" first so it is the reference group).
+# Categorical variable #2: vitamin D status, DERIVED from the continuous
+# mat_vitD column. Under 20 ng/mL is a commonly used cutoff for deficiency.
+
+GSE.covar <- GSE.covar %>%
+  mutate(
+    preg_preeclampsia = factor(preg_preeclampsia,
+                               levels = c("Normal", "Preeclampsia")),
+    vitD_status = factor(ifelse(mat_vitD < 20,
+                                "Deficient (<20 ng/mL)",
+                                "Sufficient (>=20 ng/mL)"),
+                         levels = c("Deficient (<20 ng/mL)",
+                                    "Sufficient (>=20 ng/mL)")))
+
+
+# Check that the new variable makes sense: group sizes, and that the cutoff
+# really split the vitamin D values where we said it would.
+table(GSE.covar$preg_preeclampsia, GSE.covar$vitD_status)
+GSE.covar %>% group_by(vitD_status) %>% summarise(min = min(mat_vitD), max = max(mat_vitD))
+
+```
+
+## Step 3: Clean the gene expression data and attach gene names
+
+```{r}
+# The first column of the expression file has a blank header, so we name it
+# PROBEID. Probe IDs are just labels, so we store them as text in both tables
+# so that R can match them up.
+
+GSE.GE <- GSE.GE.raw %>%
+  rename(PROBEID = 1) %>%
+  mutate(PROBEID = as.character(PROBEID))
+
+GSE.GN <- GSE.GN.raw %>%
+  mutate(PROBEID = as.character(PROBEID))
+
+# Step A: look up the gene name for each probe 
+# Step B: pivot_longer turns the sideways table (one column per person) into a
+#         tall table with one row per gene per person.
+
+GSE.GE <- GSE.GE %>%
+  left_join(GSE.GN, by = "PROBEID") %>%
+  pivot_longer(cols = -c(PROBEID, GENE),
+               names_to = "geoID",
+               values_to = "expression")
+
+# Safety checks: every probe got a gene name, and the sample IDs in the
+# expression data are exactly the sample IDs in the covariate data.
+stopifnot(!any(is.na(GSE.GE$GENE)))
+stopifnot(setequal(unique(GSE.GE$geoID), GSE.covar$geoID))
+
+head(GSE.GE)
+```
+
+## Step 4: Pick our gene and build the plotting table
+
+```{r}
+# Not every gene in the linker file is in the expression data, so check first!
+gene_of_interest <- "RUNDC3A"
+gene_of_interest %in% GSE.GE$GENE   # should be TRUE
+
+# Keep just our gene, then attach each person's covariates using geoID
+dat <- GSE.GE %>%
+  filter(GENE == gene_of_interest) %>%
+  left_join(GSE.covar, by = "geoID")
+
+# Should be 157 rows: one per person
+stopifnot(nrow(dat) == nrow(GSE.covar))
+head(dat)
+```
+
+## Plot 1: Histogram of gene expression
+
+```{r}
+ggplot(dat, aes(x = expression)) +
+  geom_histogram(bins = 20, fill = "#0072B2", color = "white") +
+  labs(x = paste(gene_of_interest, "expression level"),
+       y = "Number of samples") +
+  theme_classic(base_size = 14)
+```
+
+## Plot 2: Scatterplot of covariate vs. gene expression
+
+```{r}
+# Each dot is one person. The line is a straight-line fit with its
+# 95% confidence band, to show the overall trend.
+ggplot(dat, aes(x = mat_BMI, y = expression)) +
+  geom_point(alpha = 0.7, size = 2, color = "#0072B2") +
+  geom_smooth(method = "lm", formula = y ~ x, color = "#D55E00",
+              fill = "#D55E00", alpha = 0.2) +
+  labs(x = expression("Maternal BMI (kg/m"^2*")"),
+       y = paste(gene_of_interest, "expression level")) +
+  theme_classic(base_size = 14)
+```
+
+## Plot 3: Boxplot of gene expression by both categorical variables
+
+```{r}
+# x-axis = preeclampsia status, colour = vitamin D status.
+# Dots show the individual samples so readers can see the group sizes.
+ggplot(dat, aes(x = preg_preeclampsia, y = expression, fill = vitD_status)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7,
+               position = position_dodge(width = 0.8), width = 0.7) +
+  geom_point(aes(group = vitD_status),
+             position = position_jitterdodge(jitter.width = 0.15,
+                                             dodge.width = 0.8),
+             alpha = 0.5, size = 1.5, show.legend = FALSE) +
+  scale_fill_manual(values = c("#E69F00", "#56B4E9")) +
+  labs(x = "Pregnancy outcome",
+       y = paste(gene_of_interest, "expression level"),
+       fill = "Vitamin D status") +
+  theme_classic(base_size = 14)
+```
+
+

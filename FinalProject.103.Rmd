@@ -187,14 +187,6 @@ ggplot(dat, aes(x = mat_BMI, y = expression)) +
 fit <- lm(expression ~ preg_preeclampsia + vitD_status, data = dat)
 # Pull out the table of estimates, standard errors, t values, and p-values
 coef <- summary(fit)$coefficients
-# Build the subtitle text from the model results so the plot always matches the
-# model output. Row 2 = preeclampsia, row 3 = vitamin D sufficient.
-# %.2f = round to 2 decimals, %.3f = round to 3 decimals.
-sub_text <- sprintf(
-  "Adjusted effects: Preeclampsia %.2f (p = %.3f); Vitamin D sufficient %.2f (p = %.3f)",
-  coef[2, "Estimate"], coef[2, "Pr(>|t|)"],
-  coef[3, "Estimate"], coef[3, "Pr(>|t|)"]
-)
 
 # x-axis = preeclampsia status, colour = vitamin D status.
 # Dots show the individual samples so readers can see the group sizes.
@@ -217,8 +209,7 @@ ggplot(dat, aes(x = preg_preeclampsia, y = expression, fill = vitD_status)) +
   scale_fill_manual(values = c("#E69F00", "#56B4E9")) +
   labs(x = "Pregnancy outcome",
        y = paste(gene_of_interest, "expression level"),
-       fill = "Vitamin D status",
-       subtitle = sub_text) +
+       fill = "Vitamin D status") +
   theme_classic(base_size = 14) +
   theme(plot.subtitle = element_text(size = 9))
 ```

@@ -1,6 +1,8 @@
 ---
 title: "Submission 1"
-output: html_document
+output:
+  pdf_document: default
+  html_document: default
 date: "2026-10-21"
 ---
 
@@ -131,8 +133,21 @@ head(dat)
 ## Plot 1: Histogram of gene expression
 
 ```{r}
+# Plot 1: Histogram of gene expression
+
+# Calculate the mean and standard deviation of expression across all 157 people
+# so we can put them on the plot.
+m <- mean(dat$expression); s <- sd(dat$expression)
+
+
+# Each bar counts how many people fall in that expression range.
+# The dashed orange line marks the mean, and the text box in the top right
+# corner gives the sample size, mean, and SD (\n starts a new line).
 ggplot(dat, aes(x = expression)) +
   geom_histogram(bins = 20, fill = "#0072B2", color = "white") +
+   geom_vline(xintercept = m, color = "#D55E00", linewidth = 1, linetype = "dashed") +
+  annotate("text", x = Inf, y = Inf, hjust = 1.05, vjust = 1.5, size = 5,
+           label = sprintf("n = %d\nMean = %.2f\nSD = %.2f", nrow(dat), m, s)) +
   labs(x = paste(gene_of_interest, "expression level"),
        y = "Number of samples") +
   theme_classic(base_size = 14)
@@ -141,12 +156,22 @@ ggplot(dat, aes(x = expression)) +
 ## Plot 2: Scatterplot of covariate vs. gene expression
 
 ```{r}
+# Plot 2: Scatterplot of covariate vs. gene expression
+
+# Pearson correlation test between BMI and expression. We save it as "ct" so we
+# can pull out r (strength/direction of the relationship) and the p-value.
+ct <- cor.test(dat$mat_BMI, dat$expression)
+
 # Each dot is one person. The line is a straight-line fit with its
 # 95% confidence band, to show the overall trend.
 ggplot(dat, aes(x = mat_BMI, y = expression)) +
   geom_point(alpha = 0.7, size = 2, color = "#0072B2") +
   geom_smooth(method = "lm", formula = y ~ x, color = "#D55E00",
               fill = "#D55E00", alpha = 0.2) +
+  # Text box in the top left corner (-Inf, Inf) showing r, the p-value, and how
+  # many people have a BMI value. sum(!is.na(...)) counts the non-missing BMIs.
+  annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.5, size = 5,
+           label = sprintf("r = %.2f, p = %.2f\nn = %d", ct$estimate, ct$p.value, sum(!is.na(dat$mat_BMI)))) +
   labs(x = expression("Maternal BMI (kg/m"^2*")"),
        y = paste(gene_of_interest, "expression level")) +
   theme_classic(base_size = 14)
@@ -155,20 +180,52 @@ ggplot(dat, aes(x = mat_BMI, y = expression)) +
 ## Plot 3: Boxplot of gene expression by both categorical variables
 
 ```{r}
+# Plot 3: Boxplot of gene expression by both categorical variables
+
+# Linear model: does expression differ by preeclampsia and/or vitamin D status?
+# Each effect is estimated while holding the other one fixed.
+fit <- lm(expression ~ preg_preeclampsia + vitD_status, data = dat)
+# Pull out the table of estimates, standard errors, t values, and p-values
+coef <- summary(fit)$coefficients
+# Build the subtitle text from the model results so the plot always matches the
+# model output. Row 2 = preeclampsia, row 3 = vitamin D sufficient.
+# %.2f = round to 2 decimals, %.3f = round to 3 decimals.
+sub_text <- sprintf(
+  "Adjusted effects: Preeclampsia %.2f (p = %.3f); Vitamin D sufficient %.2f (p = %.3f)",
+  coef[2, "Estimate"], coef[2, "Pr(>|t|)"],
+  coef[3, "Estimate"], coef[3, "Pr(>|t|)"]
+)
+
 # x-axis = preeclampsia status, colour = vitamin D status.
 # Dots show the individual samples so readers can see the group sizes.
 ggplot(dat, aes(x = preg_preeclampsia, y = expression, fill = vitD_status)) +
+# Boxes show the median and spread. outlier.shape = NA hides the default
+# outlier dots since we draw every dot ourselves below.
   geom_boxplot(outlier.shape = NA, alpha = 0.7,
                position = position_dodge(width = 0.8), width = 0.7) +
-  geom_point(aes(group = vitD_status),
+# Individual people as dots, jittered sideways so they don't stack on top 
+# of each other, and lined up over the correct box. show.legend = FALSE 
+# keeps them out of the legend.
+   geom_point(aes(group = vitD_status),
              position = position_jitterdodge(jitter.width = 0.15,
                                              dodge.width = 0.8),
              alpha = 0.5, size = 1.5, show.legend = FALSE) +
+# Print the group size (n = ...) above each box at height y = 11.4.
+# length(y) counts how many people are in that group.
+  stat_summary(fun.data = function(y) data.frame(y = 11.4, label = paste0("n = ", length(y))),
+               geom = "text", position = position_dodge(width = 0.8), size = 4) +
   scale_fill_manual(values = c("#E69F00", "#56B4E9")) +
   labs(x = "Pregnancy outcome",
        y = paste(gene_of_interest, "expression level"),
-       fill = "Vitamin D status") +
-  theme_classic(base_size = 14)
+       fill = "Vitamin D status",
+       subtitle = sub_text) +
+  theme_classic(base_size = 14) +
+  theme(plot.subtitle = element_text(size = 9))
 ```
 
 
+ADDITIONAL RESOURCES USED: 
+
+- Google & Gemini: to look up commands we learned in class, and extra commands for more advanced arguments.
+
+- Claude (sonnet, medium): to check my work for errors, and help me 'dumb down'/understand specific characteristics in the data and rstudio itself. 

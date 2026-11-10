@@ -159,8 +159,11 @@ plot_gene_expression <- function(data, genes) {
     
     # Keep only this gene's rows
     d <- data %>% filter(GENE == g)
+
+    # Axis label with the gene name in italics (gene names are italicized by convention)
+   gene_lab <- bquote(italic(.(g)) ~ "expression level")
     
-    
+   
 # PLOT 1: Histogram of gene expression
     m <- mean(d$expression); s <- sd(d$expression)
     
@@ -172,7 +175,7 @@ plot_gene_expression <- function(data, genes) {
                           "\nMean = ", round(m,2),
                           "\nSD = ", round(s, 2))) +
       scale_y_continuous(expand = expansion(mult = c(0, 0.4))) +
-      labs(x = paste(g, "expression level"),
+      labs(x = gene_lab,
             y = "Number of samples") +
       theme_classic(base_size = 14)
     
@@ -195,7 +198,7 @@ plot_gene_expression <- function(data, genes) {
                         "\nn = ", sum(!is.na(d$mat_BMI)))) + 
       scale_y_continuous(expand = expansion(mult = c(0.05, 0.4))) +
       labs(x = expression("Maternal BMI (kg/m"^2*")"),
-           y = paste(g, "expression level")) +
+           y = gene_lab) +
       theme_classic(base_size = 14)
     
     
@@ -219,7 +222,7 @@ plot_gene_expression <- function(data, genes) {
                 position = position_dodge(width = 0.8), size = 4) +
       scale_fill_manual(values = c("orange", "dodgerblue")) +
       labs(x = "Pregnancy outcome",
-           y = paste(g, "expression level"),
+           y = gene_lab,
            fill = "Vitamin D status") +
       theme_classic(base_size = 14)
 
@@ -418,6 +421,8 @@ heat_args <- list(mat = heat_mat,
                   clustering_method = "complete",
                   annotation_col = annot,
                   annotation_colors = annot_colors,
+                                    labels_row = as.expression(lapply(rownames(heat_mat),
+                                                    function(x) bquote(italic(.(x))))),
                   color = colorRampPalette(c("navy", "white", "firebrick"))(100), 
                   show_colnames = F, 
                   treeheight_row = 30, treeheight_col = 40,
@@ -487,7 +492,8 @@ p_forest <- ggplot(forest_df, aes(x = estimate, y = gene, color = significant)) 
   labs(x = "Adjusted effect on expression (SD units, 95% CI)",
        y = NULL, color = NULL) +
   theme_classic(base_size = 14) +
-  theme(legend.position = "bottom",
+    theme(legend.position = "bottom",
+        axis.text.y = element_text(face = "italic"),
         strip.background = element_blank(),
         strip.text = element_text(face = "bold"),
         panel.spacing = unit(1.5, "lines"))

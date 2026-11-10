@@ -1,0 +1,542 @@
+---
+title: "Submission 1"
+output:
+  pdf_document: default
+  html_document: default
+date: "2026-10-21"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+
+# Load the three files exactly as provided (no edits to the original CSVs)
+GSE.covar.raw <-read_csv("~/Desktop/HDS/HSE103/FinalProject/GSE85307_covar-1.csv")
+
+GSE.GE.raw <-read_csv("~/Desktop/HDS/HSE103/FinalProject/GSE85307_geneExpression.csv")
+
+GSE.GN.raw <-read_csv("~/Desktop/HDS/HSE103/FinalProject/GSE85307_geneNames.csv")
+```
+
+
+## Step 1: Clean the covariate data
+
+```{r}
+
+head(GSE.covar.raw)
+summary(GSE.covar.raw)
+
+# Data Wrangling time! Whoohoo! Seems like there are some extra text in some
+# columns. With the help of the trusty mutate function
+# we can clean these cells up!
+GSE.covar <- GSE.covar.raw %>%
+  mutate(
+    mat_age_yrs = str_remove_all(mat_age_yrs,"age_years: "),
+    preg_preeclampsia = str_remove_all(preg_preeclampsia, "pregnancy_condition: "),
+    delivery_gestAge_wks = str_remove_all(delivery_gestAge_wks, "gestation_weeks: "),
+    sampleCollection_gestAge_wks = str_remove_all(sampleCollection_gestAge_wks, "blood_draw_at_gestation_week: "),
+    batch_Microarray = str_remove_all(batch_Microarray, "microarray_hybridization_date: "),
+    mat_BMI = str_remove_all(mat_BMI, "bmi_kg/m2: "),
+    mat_vitD = str_remove_all(mat_vitD, "vitamind_25\\(0h\\)_ng/ml_whole_blood_baseline: "),
+    mat_asthma = ifelse(str_ends(mat_asthma, "1"), "1", "0"))
+
+
+# I also noticed all variables are stored as characters, for safe keeping
+# I am going to change the ones that look like numeric measure to numeric 
+GSE.covar <- GSE.covar %>%
+  mutate(across(c(mat_age_yrs, delivery_gestAge_wks, sampleCollection_gestAge_wks,
+                  mat_BMI, mat_vitD),
+                as.numeric))
+
+
+head(GSE.covar)
+dim(GSE.covar)
+```
+
+
+## Step 2: Make the categorical variables
+
+```{r}
+# Categorical variable #1: preclampsia status (already categories, so we just
+# tell R it's a factor and put "Normal" first so it is the reference group).
+# Categorical variable #2: vitamin D status, DERIVED from the continuous
+# mat_vitD column. Under 20 ng/mL is a commonly used cutoff for deficiency.
+
+GSE.covar <- GSE.covar %>%
+  mutate(
+    preg_preeclampsia = factor(preg_preeclampsia,
+                               levels = c("Normal", "Preeclampsia")),
+    vitD_status = factor(ifelse(mat_vitD < 20,
+                                "Deficient (<20 ng/mL)",
+                                "Sufficient (>=20 ng/mL)"),
+                         levels = c("Deficient (<20 ng/mL)",
+                                    "Sufficient (>=20 ng/mL)")))
+
+
+# Check that the new variable makes sense: group sizes, and that the cutoff
+# really split the vitamin D values where we said it would.
+table(GSE.covar$preg_preeclampsia, GSE.covar$vitD_status)
+GSE.covar %>% group_by(vitD_status) %>% summarise(min = min(mat_vitD), max = max(mat_vitD))
+
+```
+
+## Step 3: Clean the gene expression data and attach gene names
+
+```{r}
+# The first column of the expression file has a blank header, so we name it
+# PROBEID. Probe IDs are just labels, so we store them as text in both tables
+# so that R can match them up.
+
+GSE.GE <- GSE.GE.raw %>%
+  rename(PROBEID = 1) %>%
+  mutate(PROBEID = as.character(PROBEID))
+
+GSE.GN <- GSE.GN.raw %>%
+  mutate(PROBEID = as.character(PROBEID))
+
+# Step A: look up the gene name for each probe 
+# Step B: pivot_longer turns the sideways table (one column per person) into a
+#         tall table with one row per gene per person.
+
+GSE.GE <- GSE.GE %>%
+  left_join(GSE.GN, by = "PROBEID") %>%
+  pivot_longer(cols = -c(PROBEID, GENE),
+               names_to = "geoID",
+               values_to = "expression")
+
+
+
+# DO NOT INCLUDE STOPIFNOT
+
+# Safety checks: every probe got a gene name, and the sample IDs in the
+# expression data are exactly the sample IDs in the covariate data.
+stopifnot(!any(is.na(GSE.GE$GENE)))
+stopifnot(setequal(unique(GSE.GE$geoID), GSE.covar$geoID))
+
+head(GSE.GE)
+
+```
+
+## Step 4: Pick our genes and build the plotting table
+
+```{r}
+
+#DO NOT USE STOPIFNOT
+# Not every gene in the linker file is in the expression data, so check first!
+genes_of_interest <- c("RUNDC3A", "LYN", "IGFBP1")
+stopifnot(all(genes_of_interest %in% GSE.GE$GENE))   # stops w an error if a gene is missing
+
+# Each gene should have exactly 157 rows (one probe, one row per person)
+GSE.GE %>% filter(GENE %in% genes_of_interest) %>% count(GENE)
+
+# Keep just our genes, then attach each person's covariates using geoID
+dat_all <- GSE.GE %>%
+  filter(GENE %in% genes_of_interest) %>%
+  left_join(GSE.covar, by = "geoID")
+
+# Should be 157 rows: one per person
+stopifnot(nrow(dat_all) == length(genes_of_interest) * nrow(GSE.covar))
+```
+
+## Step 5: Build the plotting function
+
+```{r}
+
+# Inputs:
+#   data = long data frame with one row per person per gene. It needs the 
+#   column GENE, expression, geoID, mat_BMI, preg_Preeclampsia, and vitD_status
+
+#   gene = character vector with the names of 1 or more genes
+
+# Output: prints 3 plots per gene, and (invisibly) returns the plots plus a 
+# small summary table of the numbers shown on them
+
+plot_gene_expression <- function(data, genes) {
+  plots <- list()       # holds every plot so we can reuse them later
+  gene_stats <- list() # holds one row of summary numbers per gene
+  
+  # Loop through each gene and make its 3 plots
+  for (g in genes){
+    
+    # Keep only this gene's rows
+    d <- data %>% filter(GENE == g)
+    
+    
+# PLOT 1: Histogram of gene expression
+    m <- mean(d$expression); s <- sd(d$expression)
+    
+    p1 <- ggplot(d, aes(x = expression)) +
+      geom_histogram(bins = 20, fill = "dodgerblue", color = "white") +
+      geom_vline(xintercept = m, color = "orange", linewidth = 1, linetype = "dashed") +
+      annotate("text", x = Inf, y = Inf, hjust = 1.05, vjust = 1.5, size = 5, 
+               label = paste0("n = ", nrow(d),
+                          "\nMean = ", round(m,2),
+                          "\nSD = ", round(s, 2))) +
+      scale_y_continuous(expand = expansion(mult = c(0, 0.4))) +
+      labs(x = paste(g, "expression level"),
+            y = "Number of samples") +
+      theme_classic(base_size = 14)
+    
+# PLOT 2: Scatterplot of BMI vs. Gener expression
+    
+    # Pearson correlation between BMI and expression for this gene
+    ct <- cor.test (d$mat_BMI, d$expression)
+    
+    # Write very small p-values as "p < 0.001" so they don't up as "p = 0.00"
+    p_text <- ifelse(ct$p.value < 0.001, "p < 0.001", sprintf("p = %.2f", ct$p.value))
+    
+    
+    p2 <- ggplot(d, aes(x = mat_BMI, y = expression)) +
+      geom_point(alpha = 0.7, size = 2, color = "dodgerblue") +
+      geom_smooth(method = "lm", formula = y~ x, color = "orange", 
+                  fill = "orange", alpha = 0.2) +
+     annotate("text", x = Inf, y = Inf, hjust = 1.1, vjust = 1.5, size = 5,
+         label = paste0("r = ", round(ct$estimate, 2),
+                        "\n", p_text,
+                        "\nn = ", sum(!is.na(d$mat_BMI)))) + 
+      scale_y_continuous(expand = expansion(mult = c(0.05, 0.4))) +
+      labs(x = expression("Maternal BMI (kg/m"^2*")"),
+           y = paste(g, "expression level")) +
+      theme_classic(base_size = 14)
+    
+    
+## PLOT 3: Boxplot of expression by both categorical variables
+    
+    # Group sizes, with the height for the "n = ..." labels set just above this
+    # gene's highest point (the old fixed height of 11.4 only worked for one gene)
+    n_labels <- d %>%
+      count(preg_preeclampsia, vitD_status) %>%
+      mutate(y = max(d$expression) + 0.05 * diff(range(d$expression)))
+    
+    
+     p3 <- ggplot(d, aes(x = preg_preeclampsia, y = expression, fill = vitD_status)) +
+      geom_boxplot(outlier.shape = NA, alpha = 0.7,
+                   position = position_dodge(width = 0.8), width = 0.7) +
+      geom_point(aes(group = vitD_status),
+                 position = position_jitterdodge(jitter.width = 0.15,
+                                                 dodge.width = 0.8, seed = 1),
+                 alpha = 0.5, size = 1.5, show.legend = FALSE) +
+      geom_text(data = n_labels, aes(y = y, label = paste0("n = ", n)),
+                position = position_dodge(width = 0.8), size = 4) +
+      scale_fill_manual(values = c("orange", "dodgerblue")) +
+      labs(x = "Pregnancy outcome",
+           y = paste(g, "expression level"),
+           fill = "Vitamin D status") +
+      theme_classic(base_size = 14)
+
+# Show the 3 plots (plots made inside a loop don't show up unless we print them)
+    print(p1); print(p2); print(p3)
+
+    
+    
+
+    
+    #CUT OUT...UNECESSARY
+    
+# Linear model with both categorical variables (used for the summary table)
+fit <- lm(expression ~ preg_preeclampsia + vitD_status, data = d)
+co  <- summary(fit)$coefficients
+
+
+    # Save this gene's plots and its summary numbers
+    plots[[g]] <- list(histogram = p1, scatter = p2, boxplot = p3)
+    gene_stats[[g]] <- tibble(
+      gene = g, mean = m, sd = s,
+      r_BMI = unname(ct$estimate), p_BMI = ct$p.value,
+      preeclampsia_effect = co[2, "Estimate"], p_preeclampsia = co[2, "Pr(>|t|)"],
+      vitD_effect = co[3, "Estimate"], p_vitD = co[3, "Pr(>|t|)"])
+  }
+
+  invisible(list(plots = plots, stats = bind_rows(gene_stats)))
+}
+
+```
+
+
+
+```{r}
+gene_results <- plot_gene_expression(dat_all, genes_of_interest)
+```
+
+
+
+
+```{r}
+# Additional packages 
+# pheatmap = clustered heatmap with tracking (annotation) bars
+# knitr = kable() to turn a data frame into a LaTex table
+# kableExtra = nicer LaTex tables (booktabs rules, grouped rows)
+library(pheatmap)
+library(knitr)
+library(kableExtra)
+
+# Everything the LaTeX report needs gets saved into these two folders,
+# so the report can \input / \includegraphics them directly.
+dir.create("figures", showWarnings = FALSE)
+dir.create("tables", showWarnings = FALSE)
+
+# Final sample size check: ... does anyone have missing covariate values?
+# If all zeros, nobody needs to be dropped and n stays at 157
+colSums(is.na(GSE.covar))
+
+# Perfect!
+nrow(GSE.covar)
+
+```
+
+
+Step 7: Summary Statistics table (stratified by preeclampsia)
+```{r}
+# The table needs 3 contiuous + 2 categorical covariates, stratified by a 
+# categorical covariate. We stratify by pregnancy outcome (categorical #1) 
+# and show:
+
+# Continuous: maternal BMI (from our plots), maternal age, and gestational
+# age at delivery (the 2 new continuous covariates)
+
+# Categorical: vit D status (categorical #2, shown as n (%))
+# Continuous variables are summarised as mean (SD) and compared with a 
+# Welch two-sample t-test. Vit D status is compared with a chi-squared test
+
+# a Smalle helper: "mean (SD)" text for one numeric vector
+mean_sd <- function(x) sprintf("%.1f (%.1f)", mean(x), sd(x))
+
+# another small helper: format p-values the same way as the plots
+fmt_p <- function(p) ifelse(p <0.001, "<0.001", sprintf("%.2f", p))
+
+# The continuous covaraites and the labels we want printed in the table
+cont_vars <- c(mat_BMI = "Maternal BMI (kg/m$^2$)",
+               mat_age_yrs = "Maternal age (years)",
+               delivery_gestAge_wks = "Gestational age at delivery (weeks)")
+
+# One row per continuous covariate: overall, Normal, Preeclampsia, p-value
+cont_rows <- map_dfr(names(cont_vars), function(v){
+  x <- GSE.covar[[v]]
+  grp <- GSE.covar$preg_preeclampsia
+  tibble(
+    Characteristic = cont_vars[[v]],
+    Overall = mean_sd(x),
+    Normal = mean_sd(x[grp == "Normal"]),
+    Preeclampsia = mean_sd(x[grp == "Preeclampsia"]),
+    P = fmt_p(t.test(x ~ grp)$p.value))
+
+})
+
+
+# Vitamin D status: count and column percent within each pregnancy outcome
+vitD_tab <- table(GSE.covar$vitD_status, GSE.covar$preg_preeclampsia)
+n_pct <- function(n, total) sprintf("%d (%.1f)", n, 100 * n / total)
+
+cat_rows <- tibble(
+  Characteristic = c("Vitamin D status, n (\\%)",
+                     "\\quad Deficient ($<$20 ng/mL)",
+                     "\\quad Sufficient ($\\geq$20 ng/mL)"),
+  Overall = c("", n_pct(rowSums(vitD_tab), nrow(GSE.covar))),
+  Normal = c("", n_pct(vitD_tab[, "Normal"], sum(vitD_tab[, "Normal"]))),
+  Preeclampsia = c("", n_pct(vitD_tab[, "Preeclampsia"], sum(vitD_tab[, "Preeclampsia"]))),
+  P = c(fmt_p(chisq.test(vitD_tab)$p.value), "", ""))
+
+
+# Stack the rows, then add the group sizes to the column names
+table1 <- bind_rows(cont_rows, cat_rows)
+n_grp <- table(GSE.covar$preg_preeclampsia)
+colnames(table1) <- c("Characteristic",
+                      sprintf("Overall (n = %d)", nrow(GSE.covar)),
+                      sprintf("Normal (n = %d)", n_grp[["Normal"]]),
+                      sprintf("Preeclampsia (n = %d)", n_grp[["Preeclampsia"]]),
+                      "$p$-value")
+
+
+# Write the LaTex version ( just the tabular; the report adds teh caption).
+# escape = F so our LaTex symbols ($^2$, \quad, \%) are kept as LaTex. 
+
+table1_tex <- kable(table1, format = "latex", booktabs = T, linesep = "", escape = F, align = c("l", "c", "c", "c", "c"))
+writeLines(table1_tex, "tables/table1.tex")
+
+
+# Also show it here in the knitted PDF
+kable(table1, format = "latex", booktabs = T, escape = F, linesep = "",
+      align = c("l", "c", "c", "c", "c"),
+      caption = "Participant characteristics by pregnancy outcome") %>% 
+  kable_styling(latex_options = c("hold_positions", "scale_down"))
+
+
+```
+
+
+Step 8: Save the 9 plots from Submission 2 for the report
+
+
+```{r}
+# gene_results (made in step 5) already holds every plot, so we just loop
+# over it and save each one as a PDF. 
+
+for (g in names(gene_results$plots)){
+  for (type in names(gene_results$plots[[g]])) {
+    ggsave(filename = file.path("figures", paste0(g, "_", type, ".pdf")),
+           plot = gene_results$plots[[g]][[type]],
+           width = 6, height = 4.5)
+  }
+}
+
+
+# The numbers behind the plots (correlations and model effects), used in
+# the Results section of the report
+gene_results$stats %>% mutate(across(where(is.numeric), ~signif(.x, 3)))
+
+
+
+```
+
+
+
+Step 9: Heatmap of the 10 most variable genes
+
+```{r}
+
+# Which 10 genes? We pick the 10 genes whose expression varies the most across
+# the 157 women (largest standard deviation). This choice does not use 
+# preeclampsia or Vit D at all, so the clustering is not "rigged"
+# to seperate the groups
+
+top10 <- GSE.GE %>% 
+  group_by(GENE) %>% 
+  summarise(sd = sd(expression)) %>% 
+  arrange(desc(sd)) %>% 
+  slice_head(n = 10)
+top10
+
+
+# pheatmap nees a matrix: one row per gene, one column per women
+heat_mat <- GSE.GE %>% 
+  filter(GENE %in% top10$GENE) %>% 
+  select(GENE, geoID, expression) %>% 
+  pivot_wider(names_from = geoID, values_from = expression) %>% 
+  column_to_rownames("GENE") %>% 
+  as.matrix()
+
+# Tracking bars: one row per woman, named by geoID so pheatmap can line them 
+# up with the matrix columns
+annot <- GSE.covar %>% 
+  select(geoID, preg_preeclampsia, vitD_status) %>% 
+  rename(`Pregnancy outcome` = preg_preeclampsia, 
+         `Vitamin D status` = vitD_status) %>% 
+  column_to_rownames("geoID")
+annot <- annot[colnames(heat_mat), ]  # same order as the matrix colimns fyi
+
+# Tracking bar colors (vit D matches teh boxplots: orange / blue)
+annot_colors <- list(
+  `Pregnancy outcome` = c(Normal = "grey80", Preeclampsia = "black"),
+  `Vitamin D status` = c(`Deficient (<20 ng/mL)` = "orange",
+                         `Sufficient (>=20 ng/mL)` = "dodgerblue"))
+
+
+# scale = "row" turns each gene into z-scores, so genes with different
+# average levels can share one color scale. Rows(genes) and columns(women)
+# are both clustered with Euclidean distance + complete linkage.
+heat_args <- list(mat = heat_mat,
+                  scale ="row", 
+                  clustering_distance_rows = "euclidean",
+                  clustering_distance_cols = "euclidean",
+                  clustering_method = "complete",
+                  annotation_col = annot,
+                  annotation_colors = annot_colors,
+                  color = colorRampPalette(c("navy", "white", "firebrick"))(100), 
+                  show_colnames = F, 
+                  treeheight_row = 30, treeheight_col = 40,
+                  fontsize =10)
+
+do.call(pheatmap, heat_args)
+
+do.call(pheatmap, c(heat_args, list(filename = "figures/heatmap.pdf", width = 9, height = 5)))
+
+
+
+# Quick check: are the two main column clusters linked to preeclampsia?
+col_clusters <- cutree(do.call(pheatmap, c(heat_args, list(silent = TRUE)))$tree_col, k = 2)
+table(cluster = col_clusters, outcome = annot[names(col_clusters), "Pregnancy outcome"])
+
+chisq.test(table(col_clusters, annot[names(col_clusters), "Pregnancy outcome"]))$p.value
+
+```
+
+
+
+
+Step 10: Additional plot: forestplot of adjusted effects
+```{r}
+# New plot type is ... A forest plot!(aka coefficient plot)
+# Instead of looking at one covariate at a time, we fit ONE model per gene. with all three covariates:
+#     expression (z-score) ~ preeclampsia + Vit D status + BMI (z-score)
+# Expression and BMI are standardised, so every effect is in "SDs of gene 
+# expression", which lets us compare the 3 genes on the same axis.
+# Dot = estimates, bars = 95% CI, dashed line = no effect.
+
+forest_df <- map_dfr(genes_of_interest, function(g){
+  d <- dat_all %>% 
+    filter(GENE == g) %>% 
+    mutate(expr_z = as.numeric(scale(expression)),
+           bmi_z = as.numeric(scale(mat_BMI)))
+  fit <- lm(expr_z ~ preg_preeclampsia + vitD_status + bmi_z, data = d)
+  ci <- confint(fit)
+  tibble(gene = g, 
+         term = rownames(ci)[-1],
+         estimate = coef(fit)[-1],
+         lower = ci[-1,1],
+         upper= ci[-1,2],
+         p = summary(fit)$coefficients[-1, "Pr(>|t|)"])
+}) %>% 
+  mutate(term = recode(term, 
+                       preg_preeclampsiaPreeclampsia = "Preeclampsia\n(vs. normal)",
+                       `vitD_statusSufficient (>=20 ng/mL)` = "Vitamin D sufficient\n(vs. deficient)",
+                       bmi_z = "Maternal BMI\n(per 1 SD)"),
+                       term = factor(term, levels = c("Preeclampsia\n(vs. normal)",
+                                                      "Vitamin D sufficient\n(vs. deficient)",
+                                                      "Maternal BMI\n(per 1 SD)")),
+                       gene = factor(gene, levels = rev(genes_of_interest)),
+                       significant = ifelse(p < 0.05, "p < 0.05", "p >= 0.05"))
+         
+         forest_df %>%  mutate(across(where(is.numeric), ~ signif(.x, 3)))
+         
+         
+         
+p_forest <- ggplot(forest_df, aes(x = estimate, y = gene, color = significant)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.2, linewidth = 0.8) +
+  geom_point(size = 3) +
+  facet_wrap(~ term, nrow = 1) +
+  scale_color_manual(values = c("p < 0.05" = "orange", "p >= 0.05" = "dodgerblue")) +
+  labs(x = "Adjusted effect on expression (SD units, 95% CI)",
+       y = NULL, color = NULL) +
+  theme_classic(base_size = 14) +
+  theme(legend.position = "bottom",
+        strip.background = element_blank(),
+        strip.text = element_text(face = "bold"),
+        panel.spacing = unit(1.5, "lines"))
+
+p_forest
+
+ggsave("figures/forest.pdf", p_forest, width = 9, height = 4)
+```
+
+
+
+```{r}
+# R and package verisons to cite in the actual report
+R.version.string
+
+sapply(c("tidyverse", "ggplot2", "dplyr", "tidyr", "readr", "stringr",
+"purrr", "tibble", "pheatmap", "knitr", "kableExtra", "rmarkdown"),
+function(p) as.character(packageVersion(p)))
+
+sessionInfo()
+```
+
+
+
+ADDITIONAL RESOURCES USED: 
+
+- Google & Gemini: to look up commands we learned in class, and extra commands for more advanced arguments.
+
+- Claude (sonnet, medium): to check my work for errors, and help me 'dumb down'/understand specific characteristics in the data and rstudio itself. 

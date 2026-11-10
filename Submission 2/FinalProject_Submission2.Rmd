@@ -1,0 +1,267 @@
+---
+title: "Submission 2"
+output:
+  pdf_document: default
+  html_document: default
+date: "2026-11-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+
+# Load the three files exactly as provided (no edits to the original CSVs)
+GSE.covar.raw <-read_csv("~/Desktop/HDS/HSE103/FinalProject/GSE85307_covar-1.csv")
+
+GSE.GE.raw <-read_csv("~/Desktop/HDS/HSE103/FinalProject/GSE85307_geneExpression.csv")
+
+GSE.GN.raw <-read_csv("~/Desktop/HDS/HSE103/FinalProject/GSE85307_geneNames.csv")
+```
+
+
+## Step 1: Clean the covariate data
+
+```{r}
+
+head(GSE.covar.raw)
+summary(GSE.covar.raw)
+
+# Data Wrangling time! Whoohoo! Seems like there are some extra text in some
+# columns. With the help of the trusty mutate function
+# we can clean these cells up!
+GSE.covar <- GSE.covar.raw %>%
+  mutate(
+    mat_age_yrs = str_remove_all(mat_age_yrs,"age_years: "),
+    preg_preeclampsia = str_remove_all(preg_preeclampsia, "pregnancy_condition: "),
+    delivery_gestAge_wks = str_remove_all(delivery_gestAge_wks, "gestation_weeks: "),
+    sampleCollection_gestAge_wks = str_remove_all(sampleCollection_gestAge_wks, "blood_draw_at_gestation_week: "),
+    batch_Microarray = str_remove_all(batch_Microarray, "microarray_hybridization_date: "),
+    mat_BMI = str_remove_all(mat_BMI, "bmi_kg/m2: "),
+    mat_vitD = str_remove_all(mat_vitD, "vitamind_25\\(0h\\)_ng/ml_whole_blood_baseline: "),
+    mat_asthma = ifelse(str_ends(mat_asthma, "1"), "1", "0"))
+
+
+# I also noticed all variables are stored as characters, for safe keeping
+# I am going to change the ones that look like numeric measure to numeric 
+GSE.covar <- GSE.covar %>%
+  mutate(across(c(mat_age_yrs, delivery_gestAge_wks, sampleCollection_gestAge_wks,
+                  mat_BMI, mat_vitD),
+                as.numeric))
+
+
+head(GSE.covar)
+dim(GSE.covar)
+```
+
+
+## Step 2: Make the categorical variables
+
+```{r}
+# Categorical variable #1: preclampsia status (already categories, so we just
+# tell R it's a factor and put "Normal" first so it is the reference group).
+# Categorical variable #2: vitamin D status, DERIVED from the continuous
+# mat_vitD column. Under 20 ng/mL is a commonly used cutoff for deficiency.
+
+GSE.covar <- GSE.covar %>%
+  mutate(
+    preg_preeclampsia = factor(preg_preeclampsia,
+                               levels = c("Normal", "Preeclampsia")),
+    vitD_status = factor(ifelse(mat_vitD < 20,
+                                "Deficient (<20 ng/mL)",
+                                "Sufficient (>=20 ng/mL)"),
+                         levels = c("Deficient (<20 ng/mL)",
+                                    "Sufficient (>=20 ng/mL)")))
+
+
+# Check that the new variable makes sense: group sizes, and that the cutoff
+# really split the vitamin D values where we said it would.
+table(GSE.covar$preg_preeclampsia, GSE.covar$vitD_status)
+GSE.covar %>% group_by(vitD_status) %>% summarise(min = min(mat_vitD), max = max(mat_vitD))
+
+```
+
+## Step 3: Clean the gene expression data and attach gene names
+
+```{r}
+# The first column of the expression file has a blank header, so we name it
+# PROBEID. Probe IDs are just labels, so we store them as text in both tables
+# so that R can match them up.
+
+GSE.GE <- GSE.GE.raw %>%
+  rename(PROBEID = 1) %>%
+  mutate(PROBEID = as.character(PROBEID))
+
+GSE.GN <- GSE.GN.raw %>%
+  mutate(PROBEID = as.character(PROBEID))
+
+# Step A: look up the gene name for each probe 
+# Step B: pivot_longer turns the sideways table (one column per person) into a
+#         tall table with one row per gene per person.
+
+GSE.GE <- GSE.GE %>%
+  left_join(GSE.GN, by = "PROBEID") %>%
+  pivot_longer(cols = -c(PROBEID, GENE),
+               names_to = "geoID",
+               values_to = "expression")
+
+# Safety checks: every probe got a gene name, and the sample IDs in the
+# expression data are exactly the sample IDs in the covariate data.
+stopifnot(!any(is.na(GSE.GE$GENE)))
+stopifnot(setequal(unique(GSE.GE$geoID), GSE.covar$geoID))
+
+head(GSE.GE)
+```
+
+## Step 4: Pick our genes and build the plotting table
+
+```{r}
+# Our 3 genes: RUNDC3A plus 2 new ones (replace GENE2 and GENE3 with your picks).
+# Not every gene in the linker file is in the expression data, so check first!
+genes_of_interest <- c("RUNDC3A", "GENE2", "GENE3")
+stopifnot(all(genes_of_interest %in% GSE.GE$GENE))   # stops with an error if a gene is missing
+
+# Each gene should have exactly 157 rows (one probe, one row per person)
+GSE.GE %>% filter(GENE %in% genes_of_interest) %>% count(GENE)
+
+# Keep just our genes, then attach each person's covariates using geoID
+dat_all <- GSE.GE %>%
+  filter(GENE %in% genes_of_interest) %>%
+  left_join(GSE.covar, by = "geoID")
+
+# Should be 3 genes x 157 people
+stopifnot(nrow(dat_all) == length(genes_of_interest) * nrow(GSE.covar))
+```
+
+## Step 5: Build the plotting function
+
+```{r}
+# Function: makes the Submission 1 plots (histogram, scatterplot, boxplot) for every gene given
+
+# Inputs:
+#   data  = long data frame with one row per person per gene. It needs the columns
+#           GENE, expression, geoID, mat_BMI, preg_preeclampsia, and vitD_status
+#   genes = character vector with the names of 1 or more genes
+# Output: prints 3 plots per gene, and (invisibly) returns the plots plus a small
+#         summary table of the numbers shown on them
+plot_gene_expression <- function(data, genes) {
+
+  # Safety checks: the columns we need exist, and every gene we asked for is in the data
+  needed <- c("GENE", "expression", "geoID", "mat_BMI", "preg_preeclampsia", "vitD_status")
+  stopifnot(all(needed %in% names(data)))
+  missing_genes <- setdiff(genes, unique(data$GENE))
+  if (length(missing_genes) > 0) {
+    stop("Gene(s) not found in data: ", paste(missing_genes, collapse = ", "))
+  }
+
+  plots <- list()        # will hold every plot so we can reuse them later
+  gene_stats <- list()   # will hold one row of summary numbers per gene
+
+  # Loop through each gene and make its 3 plots
+  for (g in genes) {
+
+    # Keep only this gene's rows
+    d <- data %>% filter(GENE == g)
+
+    # Safety check: should be one row per person. More rows means the gene has
+    # more than one probe on the array, which would double count people.
+    if (nrow(d) != n_distinct(d$geoID)) {
+      stop(g, " has more than one probe per person. Pick one probe or a different gene.")
+    }
+
+    # ---- Plot 1: Histogram of gene expression ----
+
+    # Mean and standard deviation of expression across all people
+    m <- mean(d$expression); s <- sd(d$expression)
+
+    # The extra space at the top of the y-axis (expand) leaves a blank spot for the
+    # text box, so it can never sit on top of the bars, whatever the gene looks like.
+    p1 <- ggplot(d, aes(x = expression)) +
+      geom_histogram(bins = 20, fill = "dodgerblue", color = "white") +
+      geom_vline(xintercept = m, color = "orange", linewidth = 1, linetype = "dashed") +
+      annotate("text", x = Inf, y = Inf, hjust = 1.05, vjust = 1.5, size = 5,
+               label = sprintf("n = %d\nMean = %.2f\nSD = %.2f", nrow(d), m, s)) +
+      scale_y_continuous(expand = expansion(mult = c(0, 0.4))) +
+      labs(x = paste(g, "expression level"),
+           y = "Number of samples") +
+      theme_classic(base_size = 14)
+
+    # ---- Plot 2: Scatterplot of BMI vs. gene expression ----
+
+    # Pearson correlation between BMI and expression for this gene
+    ct <- cor.test(d$mat_BMI, d$expression)
+
+    # Write very small p-values as "p < 0.001" so they don't show up as "p = 0.00"
+    p_text <- ifelse(ct$p.value < 0.001, "p < 0.001", sprintf("p = %.2f", ct$p.value))
+
+    # FEEDBACK FIX: the correlation text used to overlap some of the points.
+    # Now the y-axis has extra blank space at the top (expand), and the text box
+    # goes in that blank space, above every point.
+    p2 <- ggplot(d, aes(x = mat_BMI, y = expression)) +
+      geom_point(alpha = 0.7, size = 2, color = "dodgerblue") +
+      geom_smooth(method = "lm", formula = y ~ x, color = "orange",
+                  fill = "orange", alpha = 0.2) +
+      annotate("text", x = -Inf, y = Inf, hjust = -0.1, vjust = 1.5, size = 5,
+               label = sprintf("r = %.2f, %s\nn = %d", ct$estimate, p_text,
+                               sum(!is.na(d$mat_BMI)))) +
+      scale_y_continuous(expand = expansion(mult = c(0.05, 0.4))) +
+      labs(x = expression("Maternal BMI (kg/m"^2*")"),
+           y = paste(g, "expression level")) +
+      theme_classic(base_size = 14)
+
+    # ---- Plot 3: Boxplot of expression by both categorical variables ----
+
+    # Linear model with both categorical variables (used for the summary table)
+    fit <- lm(expression ~ preg_preeclampsia + vitD_status, data = d)
+    co  <- summary(fit)$coefficients
+
+    # Group sizes, with the height for the "n = ..." labels set just above this
+    # gene's highest point (the old fixed height of 11.4 only worked for one gene)
+    n_labels <- d %>%
+      count(preg_preeclampsia, vitD_status) %>%
+      mutate(y = max(d$expression) + 0.05 * diff(range(d$expression)))
+
+    p3 <- ggplot(d, aes(x = preg_preeclampsia, y = expression, fill = vitD_status)) +
+      geom_boxplot(outlier.shape = NA, alpha = 0.7,
+                   position = position_dodge(width = 0.8), width = 0.7) +
+      geom_point(aes(group = vitD_status),
+                 position = position_jitterdodge(jitter.width = 0.15,
+                                                 dodge.width = 0.8, seed = 1),
+                 alpha = 0.5, size = 1.5, show.legend = FALSE) +
+      geom_text(data = n_labels, aes(y = y, label = paste0("n = ", n)),
+                position = position_dodge(width = 0.8), size = 4) +
+      scale_fill_manual(values = c("orange", "dodgerblue")) +
+      labs(x = "Pregnancy outcome",
+           y = paste(g, "expression level"),
+           fill = "Vitamin D status") +
+      theme_classic(base_size = 14)
+
+    # Show the 3 plots (plots made inside a loop don't show up unless we print them)
+    print(p1); print(p2); print(p3)
+
+    # Save this gene's plots and its summary numbers
+    plots[[g]] <- list(histogram = p1, scatter = p2, boxplot = p3)
+    gene_stats[[g]] <- tibble(
+      gene = g, mean = m, sd = s,
+      r_BMI = unname(ct$estimate), p_BMI = ct$p.value,
+      preeclampsia_effect = co[2, "Estimate"], p_preeclampsia = co[2, "Pr(>|t|)"],
+      vitD_effect = co[3, "Estimate"], p_vitD = co[3, "Pr(>|t|)"])
+  }
+
+  invisible(list(plots = plots, stats = bind_rows(gene_stats)))
+}
+```
+
+## Step 6: Make the plots for all 3 genes
+
+```{r, fig.width = 6, fig.height = 4, fig.align = "center"}
+# Run the function on all 3 genes: prints the histogram, scatterplot and boxplot
+# for each one (9 plots total)
+gene_results <- plot_gene_expression(dat_all, genes_of_interest)
+```
+
+ADDITIONAL RESOURCES USED: 
+
+- Google & Gemini: to look up commands we learned in class, and extra commands for more advanced arguments.
+
+- Claude (sonnet, medium): to check my work for errors, and help me 'dumb down'/understand specific characteristics in the data and rstudio itself. 
